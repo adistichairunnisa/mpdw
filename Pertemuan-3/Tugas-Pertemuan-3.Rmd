@@ -1,0 +1,331 @@
+---
+title: "Tugas Praktikum 3 MPDW"
+author: "Adisti Chairunnisa Maharatih M0401241102"
+output:
+  rmdformats::readthedown
+date: "2026-09-05"
+---
+
+# Data
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(car)
+
+data <- read.csv("C:\\Users\\HP\\OneDrive\\Documents\\NewDelhi_Air_quality.csv")
+
+data.model <- data[, c("AQI", "o3")]
+names(data.model) <- c("Yt", "Xt")
+
+head(data.model)
+summary(data.model)
+sum(is.na(data.model))
+```
+
+Pada analisis ini, AQI digunakan sebagai peubah dependen ($Y_t$), sedangkan O$_3$ sebagai peubah independen ($X_t$). O$_3$ dipilih karena memiliki hubungan paling kuat dengan AQI dibandingkan peubah lainnya.
+
+Data kemudian dibagi menjadi data training sebesar 80% dan data testing sebesar 20%.
+
+```{r split}
+n <- nrow(data.model)
+n.train <- floor(0.8 * n)
+
+train <- data.model[1:n.train, ]
+test <- data.model[(n.train + 1):n, ]
+
+nrow(train)
+nrow(test)
+```
+
+# Model Koyck
+
+Model Koyck memasukkan peubah bebas saat ini ($X_t$) dan lag dari peubah tak bebas ($Y_{t-1}$).
+
+```{r koyck}
+model.koyck <- koyckDlm(
+  x = train$Xt,
+  y = train$Yt
+)
+
+summary(model.koyck)
+```
+
+## Forecasting Model Koyck
+
+```{r forecast-koyck}
+fore.koyck <- forecast(
+  model = model.koyck,
+  x = test$Xt,
+  h = nrow(test)
+)
+
+mape.koyck <- MAPE(
+  fore.koyck$forecasts,
+  test$Yt
+)
+
+deviance.koyck <- sum(
+  (test$Yt - fore.koyck$forecasts)^2
+)
+
+mape.koyck
+deviance.koyck
+```
+
+# Distributed Lag Model (DLM)
+
+Pada Distributed Lag Model, peubah bebas dapat memberikan pengaruh terhadap peubah tak bebas pada beberapa periode waktu. Penentuan lag optimum dilakukan menggunakan AIC.
+
+```{r dlm-opt}
+dlm.opt <- finiteDLMauto(
+  formula = Yt ~ Xt,
+  data = data.frame(train),
+  q.min = 1,
+  q.max = 10,
+  model.type = "dlm",
+  error.type = "AIC",
+  trace = TRUE
+)
+
+dlm.opt
+```
+
+```{r dlm-model}
+q.opt <- dlm.opt[which.min(dlm.opt$AIC), "q - k"]
+q.opt
+
+model.dlm.opt <- dlm(
+  x = train$Xt,
+  y = train$Yt,
+  q = q.opt
+)
+
+summary(model.dlm.opt)
+```
+
+## Forecasting Model DLM
+
+```{r forecast-dlm}
+fore.dlm.opt <- forecast(
+  model = model.dlm.opt,
+  x = test$Xt,
+  h = nrow(test)
+)
+
+mape.dlm.opt <- MAPE(
+  fore.dlm.opt$forecasts,
+  test$Yt
+)
+
+deviance.dlm.opt <- sum(
+  (test$Yt - fore.dlm.opt$forecasts)^2
+)
+
+mape.dlm.opt
+deviance.dlm.opt
+```
+
+# Autoregressive Distributed Lag (ARDL)
+
+Model ARDL memasukkan lag dari peubah bebas dan lag dari peubah tak bebas. Penentuan lag optimum dilakukan berdasarkan nilai AIC.
+
+```{r ardl-opt}
+model.ardl.opt <- ardlBoundOrders(
+  data = data.frame(data.model),
+  ic = "AIC",
+  formula = Yt ~ Xt
+)
+
+model.ardl.opt
+```
+
+```{r ardl-lag}
+min_p <- c()
+
+for(i in 1:6){
+  min_p[i] <- min(model.ardl.opt$Stat.table[[i]])
+}
+
+q_opt <- which(
+  min_p == min(min_p, na.rm = TRUE)
+)[1]
+
+p_opt <- which(
+  model.ardl.opt$Stat.table[[q_opt]] ==
+    min(model.ardl.opt$Stat.table[[q_opt]], na.rm = TRUE)
+)[1]
+
+data.frame(
+  "Lag_Y_opt(q)" = q_opt,
+  "Lag_X_opt(p)" = p_opt,
+  "AIC" = model.ardl.opt$min.Stat
+)
+```
+
+```{r ardl-model}
+model.ardl <- ardlDlm(
+  formula = Yt ~ Xt,
+  data = train,
+  p = p_opt,
+  q = q_opt
+)
+
+summary(model.ardl)
+```
+
+## Forecasting Model ARDL
+
+```{r forecast-ardl}
+fore.ardl <- forecast(
+  model = model.ardl,
+  x = test$Xt,
+  h = nrow(test)
+)
+
+mape.ardl <- MAPE(
+  fore.ardl$forecasts,
+  test$Yt
+)
+
+deviance.ardl <- sum(
+  (test$Yt - fore.ardl$forecasts)^2
+)
+
+mape.ardl
+deviance.ardl
+```
+
+# Pengujian Asumsi
+
+## Model Koyck
+
+```{r asumsi-koyck}
+koyck.lm <- dynlm(
+  Yt ~ Xt + L(Yt),
+  data = train
+)
+
+dwtest(koyck.lm)
+bptest(koyck.lm)
+shapiro.test(residuals(koyck.lm))
+```
+
+## Model DLM
+
+```{r asumsi-dlm}
+train.ts <- ts(train)
+
+dlm.lm <- dynlm(
+  Yt ~ Xt + L(Xt, 1) + L(Xt, 2) + L(Xt, 3) +
+       L(Xt, 4) + L(Xt, 5) + L(Xt, 6) +
+       L(Xt, 7) + L(Xt, 8) + L(Xt, 9) +
+       L(Xt, 10),
+  data = train.ts
+)
+
+dwtest(dlm.lm)
+bptest(dlm.lm)
+shapiro.test(residuals(dlm.lm))
+```
+
+## Model ARDL
+
+```{r asumsi-ardl}
+train.ts <- ts(train)
+
+ardl.lm <- dynlm(
+  Yt ~ Xt +
+    L(Xt, 1) + L(Xt, 2) + L(Xt, 3) +
+    L(Xt, 4) + L(Xt, 5) + L(Xt, 6) +
+    L(Xt, 7) + L(Xt, 8) + L(Xt, 9) +
+    L(Xt, 10) + L(Xt, 11) + L(Xt, 12) +
+    L(Xt, 13) +
+    L(Yt, 1) + L(Yt, 2),
+  data = train.ts
+)
+
+dwtest(ardl.lm)
+bptest(ardl.lm)
+shapiro.test(residuals(ardl.lm))
+```
+
+# Perbandingan Model
+
+Nilai MAPE dan deviance dari ketiga model dibandingkan untuk menentukan model dengan kemampuan forecasting terbaik.
+
+```{r comparison}
+hasil <- data.frame(
+  Model = c("Koyck", "DLM", "ARDL"),
+  MAPE = c(
+    mape.koyck,
+    mape.dlm.opt,
+    mape.ardl
+  ),
+  Deviance = c(
+    deviance.koyck,
+    deviance.dlm.opt,
+    deviance.ardl
+  )
+)
+
+hasil
+```
+
+Model dengan nilai MAPE dan deviance yang lebih kecil menunjukkan hasil forecasting yang lebih baik.
+
+# Visualisasi Forecasting
+
+```{r plot-forecast}
+plot(
+  test$Yt,
+  type = "o",
+  col = "black",
+  xlab = "Periode",
+  ylab = "AQI",
+  main = "Perbandingan Actual dan Forecast"
+)
+
+lines(
+  fore.koyck$forecasts,
+  type = "o",
+  col = "blue"
+)
+
+lines(
+  fore.dlm.opt$forecasts,
+  type = "o",
+  col = "red"
+)
+
+lines(
+  fore.ardl$forecasts,
+  type = "o",
+  col = "green"
+)
+
+legend(
+  "topleft",
+  legend = c(
+    "Actual",
+    "Koyck",
+    "DLM",
+    "ARDL"
+  ),
+  col = c(
+    "black",
+    "blue",
+    "red",
+    "green"
+  ),
+  lty = 1,
+  pch = 1
+)
+```
+
+# Kesimpulan
+
+Berdasarkan hasil forecasting, ketiga model yaitu Koyck, Distributed Lag Model (DLM), dan Autoregressive Distributed Lag (ARDL) dibandingkan menggunakan nilai MAPE dan deviance. Model dengan nilai MAPE dan deviance paling kecil dipilih sebagai model dengan kemampuan forecasting terbaik, yaitu DLM. Hasil pengujian asumsi juga digunakan sebagai pertimbangan dalam mengevaluasi kelayakan model.
+
