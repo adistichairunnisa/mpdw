@@ -1,0 +1,685 @@
+---
+title: "Pemodelan ARIMA Data NVDA"
+author: "Adisti Chairunnisa Maharatih M0401241102"
+output:
+  rmdformats::readthedown
+date: "2026-09-26"
+---
+
+# Packages
+```{r}
+library(ggplot2)
+library(tsibble)
+library(tseries)
+library(MASS)
+library(forecast)
+library(TSA)
+library(TTR)
+library(aTSA)
+library(graphics)
+```
+
+# Input Data
+```{r}
+# Membaca data
+nvda <- read.csv("C:\\Users\\HP\\OneDrive\\Documents\\nvda_us_d.csv")
+
+# Mengubah Date menjadi format tanggal
+nvda$Date <- as.Date(nvda$Date)
+
+# Melihat struktur data
+str(nvda)
+
+# Membuat deret waktu berdasarkan harga penutupan
+nvda.ts <- ts(nvda$Close)
+
+# Melihat jumlah observasi
+length(nvda.ts)
+```
+
+# Eksplorasi Data
+
+## Plot Data Penuh
+```{r}
+plot(nvda.ts,
+     lty = 1,
+     xlab = "Waktu",
+     ylab = "Harga Close",
+     main = "Plot Harga Penutupan Saham NVDA")
+```
+
+# Pembagian Data Train dan Test
+```{r}
+# Pembagian data 86% : 14%
+n <- length(nvda.ts)
+n_train <- floor(0.86 * n)
+
+train.ts <- nvda.ts[1:n_train]
+test.ts <- nvda.ts[(n_train + 1):n]
+
+length(train.ts)
+length(test.ts)
+```
+
+## Plot Data Latih
+```{r}
+plot.ts(train.ts,
+        lty = 1,
+        xlab = "Waktu",
+        ylab = "Harga Close",
+        main = "Plot Data Latih NVDA")
+```
+
+## Plot Data Uji
+```{r}
+plot.ts(test.ts,
+        lty = 1,
+        xlab = "Waktu",
+        ylab = "Harga Close",
+        main = "Plot Data Uji NVDA")
+```
+
+# Uji Stasioneritas Data
+
+## Plot ACF
+```{r}
+acf(train.ts,
+    main = "ACF Data Latih NVDA")
+```
+
+## Uji ADF
+\(H_0 : \text{Data tidak stasioner dalam rataan}\)  
+\(H_1 : \text{Data stasioner dalam rataan}\)
+
+```{r}
+tseries::adf.test(train.ts)
+```
+
+Data harga penutupan saham NVDA belum stasioner dalam rataan. Oleh karena itu, diperlukan penanganan ketidakstasioneran sebelum dilakukan pemodelan ARIMA.
+
+## Plot Box-Cox
+```{r}
+library(MASS)
+
+index <- seq(1:length(train.ts))
+
+bc <- boxcox(
+  train.ts ~ index,
+  lambda = seq(0.5, 2, by = 0.1)
+)
+
+# Lambda optimum
+lambda_opt <- bc$x[which.max(bc$y)]
+lambda_opt
+
+# Selang kepercayaan 95%
+ci_lambda <- bc$x[
+  bc$y > max(bc$y) -
+    0.5 * qchisq(0.95, df = 1)
+]
+
+ci_lower <- min(ci_lambda)
+ci_upper <- max(ci_lambda)
+
+c(
+  Batas_Bawah = ci_lower,
+  Batas_Atas = ci_upper
+)
+```
+
+Berdasarkan plot di atas, data NVDA juga tidak stasioner dalam ragam karena selangnya tidak memuat angka 1.
+
+# Penanganan Ketidakstasioneran (Differencing Pertama)
+```{r}
+train.diff <- diff(train.ts, differences = 1)
+
+plot.ts(
+  train.diff,
+  lty = 1,
+  xlab = "Waktu",
+  ylab = "Difference 1 Harga Close",
+  main = "Plot Differencing Pertama NVDA"
+)
+```
+
+Setelah differencing pertama, data tidak lagi menunjukkan tren naik seperti data asli.
+
+# Uji Stasioner Setelah Differencing
+
+## ACF
+```{r}
+acf(train.diff,
+    main = "ACF Differencing Pertama NVDA")
+```
+
+## Uji ADF
+```{r}
+tseries::adf.test(train.diff)
+```
+
+Karena p-value < 0.05 , maka Tolak H0. Setelah dilakukan differencing pertama, data sudah stasioner dalam rataan. Dengan demikian, ketidakstasioneran dalam rataan telah berhasil ditangani.
+
+## Plot Box-Cox
+```{r}
+index_diff <- seq(1:length(train.diff))
+
+min_val <- min(train.diff)
+
+if (min_val <= 0) {
+  c_shift <- abs(min_val) + 1
+  train.diff_shifted <- train.diff + c_shift
+} else {
+  train.diff_shifted <- train.diff
+}
+
+bc_diff <- boxcox(
+  train.diff_shifted ~ index_diff,
+  lambda = seq(0.5, 2, by = 0.1)
+)
+
+lambda_opt_diff <- bc_diff$x[which.max(bc_diff$y)]
+
+print(
+  paste(
+    "Lambda optimum setelah differencing:",
+    lambda_opt_diff
+  )
+)
+
+ci_lambda_diff <- bc_diff$x[
+  bc_diff$y >
+    max(bc_diff$y) -
+    0.5 * qchisq(0.95, df = 1)
+]
+
+ci_lower_diff <- min(ci_lambda_diff)
+ci_upper_diff <- max(ci_lambda_diff)
+
+c(
+  Batas_Bawah = ci_lower_diff,
+  Batas_Atas = ci_upper_diff
+)
+```
+
+Setelah dilakukan differencing, ternyata data masih belum stasioner dalam ragam.
+
+# Transformasi Setelah Differencing
+
+Karena hasil uji Box-Cox setelah differencing menunjukkan bahwa selang kepercayaan lambda tidak memuat angka 1, maka data hasil differencing perlu ditransformasi terlebih dahulu untuk menstabilkan ragam.
+
+```{r}
+if (ci_lower_diff > 1 | ci_upper_diff < 1) {
+
+  if (abs(lambda_opt_diff) < 1e-8) {
+    train.trans <- log(train.diff_shifted)
+  } else {
+    train.trans <- (
+      train.diff_shifted^lambda_opt_diff - 1
+    ) / lambda_opt_diff
+  }
+
+  transformasi_dilakukan <- TRUE
+
+  plot.ts(
+    train.trans,
+    lty = 1,
+    xlab = "Waktu",
+    ylab = "Data Tertransformasi",
+    main = "Plot Data Setelah Transformasi Box-Cox"
+  )
+
+} else {
+
+  train.trans <- train.diff
+  transformasi_dilakukan <- FALSE
+
+  plot.ts(
+    train.trans,
+    lty = 1,
+    xlab = "Waktu",
+    ylab = "Difference 1 Harga Close",
+    main = "Plot Data Setelah Pemeriksaan Box-Cox"
+  )
+}
+
+transformasi_dilakukan
+```
+
+Setelah transformasi dilakukan, stasioneritas dalam rataan dan ragam diperiksa kembali.
+
+# Uji Stasioneritas Setelah Transformasi
+
+## ACF
+```{r}
+acf(
+  train.trans,
+  main = "ACF Data Setelah Transformasi Box-Cox"
+)
+```
+
+## Uji AD
+```{r}
+tseries::adf.test(train.trans)
+```
+
+Karean p-value < 0.05, maka Tolak H0 sehingga data hasil transformasi sudah stasioner dalam rataan.
+
+## Uji Box-Cox
+```{r}
+
+# Box-Cox membutuhkan data positif.
+# Jika masih terdapat nilai <= 0, lakukan pergeseran sementara.
+
+min_trans <- min(train.trans)
+
+if (min_trans <= 0) {
+  c_shift_trans <- abs(min_trans) + 1
+  train.trans_shifted <- train.trans + c_shift_trans
+} else {
+  c_shift_trans <- 0
+  train.trans_shifted <- train.trans
+}
+
+index_trans <- seq(1:length(train.trans_shifted))
+
+bc_trans <- boxcox(
+  train.trans_shifted ~ index_trans,
+  lambda = seq(0.5, 2, by = 0.1)
+)
+
+lambda_opt_trans <- bc_trans$x[which.max(bc_trans$y)]
+
+print(
+  paste(
+    "Lambda optimum setelah transformasi:",
+    lambda_opt_trans
+  )
+)
+
+ci_lambda_trans <- bc_trans$x[
+  bc_trans$y >
+    max(bc_trans$y) -
+    0.5 * qchisq(0.95, df = 1)
+]
+
+ci_lower_trans <- min(ci_lambda_trans)
+ci_upper_trans <- max(ci_lambda_trans)
+
+c(
+  Batas_Bawah = ci_lower_trans,
+  Batas_Atas = ci_upper_trans
+)
+```
+
+Karena selang kepercayaan lambda hasil pemeriksaan ulang memuat angka 1, maka ragam data hasil transformasi sudah stasioner.
+
+Untuk keperluan identifikasi model, digunakan data hasil transformasi sebagai data akhir.
+
+```{r}
+train.final <- train.trans
+```
+
+# Identifikasi Model
+
+## ACF
+```{r}
+acf(train.final,
+    main = "ACF Differencing Pertama")
+```
+
+Kandidat: ARIMA(0,1,1)
+
+## PACF
+```{r}
+pacf(train.final,
+     main = "PACF Differencing Pertama")
+```
+
+Kandidat: ARIMA(1,1,0), ARIMA (1,1,1)
+
+## EACF
+```{r}
+eacf(train.final)
+```
+
+Kandidat : ARIMA(0,1,3), ARIMA(1,1,4)
+
+# Pendugaan Parameter Model
+
+## Model 1 ARIMA (0,1,1)
+```{r}
+model1 <- Arima(
+  train.final,
+  order = c(0,0,1),
+  method = "ML"
+)
+
+summary(model1)
+lmtest::coeftest(model1)
+```
+
+## Model 2 ARIMA (1,1,0)
+```{r}
+model2 <- Arima(
+  train.final,
+  order = c(1,0,0),
+  method = "ML"
+)
+
+summary(model2)
+lmtest::coeftest(model2)
+```
+
+## Model 3 ARIMA (1,1,1)
+```{r}
+model3 <- Arima(
+  train.final,
+  order = c(1,0,1),
+  method = "ML"
+)
+
+summary(model3)
+lmtest::coeftest(model3)
+```
+
+## Model 4 ARIMA (0,1,3)
+```{r}
+model4 <- Arima(
+  train.final,
+  order = c(0,0,3),
+  method = "ML"
+)
+
+summary(model4)
+lmtest::coeftest(model4)
+```
+
+## Model 5 ARIMA (1,1,4)
+```{r}
+model5 <- Arima(
+  train.final,
+  order = c(1,0,4),
+  method = "ML"
+)
+
+summary(model5)
+lmtest::coeftest(model5)
+```
+
+## Ringkasan AIC dan BIC
+```{r}
+model_tentatif <- data.frame(
+  Model = c(
+    "ARIMA(0,1,1)",
+    "ARIMA(1,1,0)",
+    "ARIMA(1,1,1)",
+    "ARIMA(0,1,3)",
+    "ARIMA(1,1,4)"
+  ),
+
+  AIC = c(
+    AIC(model1),
+    AIC(model2),
+    AIC(model3),
+    AIC(model4),
+    AIC(model5)
+  ),
+
+  BIC = c(
+    BIC(model1),
+    BIC(model2),
+    BIC(model3),
+    BIC(model4),
+    BIC(model5)
+  )
+)
+
+model_tentatif
+```
+
+Berdasarkan model-model di atas, dipilih model ARIMA(0,1,3) sebagai model terbaik.
+
+# Analisis Sisaan Model Terbaik
+
+```{r}
+model.best <- model4
+
+sisaan <- model.best$residuals
+```
+
+```{r}
+par(
+  mfrow = c(2,2),
+  mar = c(4,4,2,1),
+  oma = c(0,0,2,0)
+)
+
+# Q-Q Plot
+qqnorm(
+  sisaan,
+  main = "Normal Q-Q Plot"
+)
+
+qqline(
+  sisaan,
+  col = "blue",
+  lwd = 2
+)
+
+# Sisaan vs waktu
+plot(
+  sisaan,
+  type = "p",
+  main = "Plot Sisaan vs Waktu",
+  xlab = "Waktu",
+  ylab = "Sisaan"
+)
+
+# ACF
+acf(
+  sisaan,
+  main = "ACF Sisaan"
+)
+
+# PACF
+pacf(
+  sisaan,
+  main = "PACF Sisaan"
+)
+
+par(mfrow = c(1,1))
+```
+
+# Uji Formal Sisaan
+
+## Uji Normalitas KS
+\(H_0 : \text{Sisaan menyebar normal}\)  
+\(H_1 : \text{Sisaan tidak menyebar normal}\)
+
+```{r}
+ks.test(
+  scale(sisaan),
+  "pnorm"
+)
+```
+
+Karena p-value < 0.05, maka Tolak Ho. Sisaan tidak mengikuti distribusi normal.
+
+## Uji Kebebasan Sisaan
+\(H_0 : \text{Sisaan saling bebas}\)  
+\(H_1 : \text{Sisaan tidak saling bebas}\)
+
+```{r}
+Box.test(
+  sisaan,
+  type = "Ljung"
+)
+```
+
+Karena p-value > 0.05, maka Gagal Tolak H0. Artinya, Sisaan saling bebas.
+
+## Uji Kehomogenan Ragam
+\(H_0 : \text{Ragam sisaan homogen}\)  
+\(H_1 : \text{Ragam sisaan tidak homogen}\)
+
+```{r}
+Box.test(
+  sisaan^2,
+  type = "Ljung"
+)
+```
+
+Karena p-value < 0.05, maka Tolak H0. Artinya, ragam sisaan tidak homogen.
+
+## Uji Nilai Tengah Sisaan
+\(H_0 : \mu_e = 0\)  
+\(H_1 : \mu_e \neq 0\)
+
+```{r}
+t.test(
+  sisaan,
+  mu = 0,
+  conf.level = 0.95
+)
+```
+
+Karena p-value > 0.05, maka Gagal Tolak H0. Artinya, tidak terdapat bukti bahwa nilai tengah sisaan berbeda dari nol.
+
+# Overfitting
+```{r}
+over1 <- Arima(
+  train.final,
+  order = c(1,0,3),
+  method = "ML"
+)
+
+over2 <- Arima(
+  train.final,
+  order = c(0,0,4),
+  method = "ML"
+)
+
+summary(over1)
+lmtest::coeftest(over1)
+
+summary(over2)
+lmtest::coeftest(over2)
+```
+
+```{r}
+overfitting <- data.frame(
+  Model = c(
+    "ARIMA(0,1,3)",
+    "ARIMA(1,1,3)",
+    "ARIMA(0,1,4)"
+  ),
+
+  AIC = c(
+    AIC(model.best),
+    AIC(over1),
+    AIC(over2)
+  ),
+
+  BIC = c(
+    BIC(model.best),
+    BIC(over1),
+    BIC(over2)
+  )
+)
+
+overfitting
+```
+
+Hasil overfitting check menunjukkan bahwa penambahan parameter pada model ARIMA(0,1,3) tidak memberikan perbaikan yang berarti. ARIMA(1,1,3) memiliki nilai AIC sedikit lebih rendah, tetapi nilai BIC lebih tinggi dibandingkan ARIMA(0,1,3). Sementara itu, ARIMA(0,1,4) memiliki nilai AIC dan BIC yang lebih tinggi. Jadi model yang digunakan untuk peramalan tetap: ARIMA(0,1,3).
+
+# Forecast/Peramalan
+```{r}
+ramalan <- forecast::forecast(
+  model.best,
+  h = length(test.ts)
+)
+
+ramalan
+
+plot(ramalan)
+```
+
+# Inverse Transformasi dan Differencing
+Karena model dibangun berdasarkan data hasil differencing yang kemudian ditransformasi dengan Box-Cox, hasil ramalan perlu dikembalikan terlebih dahulu ke skala setelah differencing, kemudian dikembalikan ke skala harga asli
+
+```{r}
+data.ramalan.trans <- ramalan$mean
+
+# Inverse transformasi Box-Cox
+if (transformasi_dilakukan) {
+
+  if (abs(lambda_opt_diff) < 1e-8) {
+    data.ramalan.shifted <- exp(data.ramalan.trans)
+  } else {
+    data.ramalan.shifted <- (
+      lambda_opt_diff * data.ramalan.trans + 1
+    )^(1 / lambda_opt_diff)
+  }
+
+  # Mengembalikan hasil dari data yang sebelumnya digeser
+  data.ramalan <- data.ramalan.shifted - c_shift
+
+} else {
+
+  # Jika tidak dilakukan transformasi, hasil forecast sudah berada pada skala differencing.
+  data.ramalan <- data.ramalan.trans
+}
+
+# Inverse differencing
+pt_akhir_train <- tail(train.ts, 1)
+
+forecast.inv <- diffinv(
+  data.ramalan,
+  differences = 1,
+  xi = pt_akhir_train
+)
+
+hasil <- forecast.inv[-1]
+
+hasil <- hasil[1:length(test.ts)]
+```
+
+
+# Akurasi Forecast
+```{r}
+akurasi_test <- accuracy(
+  hasil,
+  test.ts
+)
+
+akurasi_test
+```
+
+Model ARIMA(0,1,3) menghasilkan MAPE sebesar 10,36%, yang menunjukkan bahwa rata-rata kesalahan absolut hasil peramalan pada data test adalah sekitar 10,36%..
+
+# Plot Aktual vs Forecast
+```{r}
+ts.plot(
+  nvda.ts,
+  lty = 1,
+  xlab = "Waktu",
+  ylab = "Harga Close",
+  main = "Harga Aktual dan Forecast NVDA"
+)
+
+lines(
+  (n_train + 1):(n_train + length(hasil)),
+  hasil,
+  lty = 2,
+  lwd = 2
+)
+
+legend(
+  "topleft",
+  legend = c("Data Aktual", "Forecast"),
+  lty = c(1,2),
+  lwd = c(1,2),
+  bty = "n"
+)
+```
+
